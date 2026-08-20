@@ -1,0 +1,185 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Montenegro monitoring - open new listings</title>
+  <style>
+    :root {
+      color-scheme: light;
+      font-family: "Segoe UI", Arial, sans-serif;
+      background: #f4f6f8;
+      color: #17202a;
+    }
+    body {
+      margin: 0;
+      padding: 32px 20px;
+    }
+    main {
+      max-width: 860px;
+      margin: 0 auto;
+      background: #ffffff;
+      border: 1px solid #ccd3da;
+      border-radius: 6px;
+      padding: 28px;
+    }
+    h1 {
+      margin: 0 0 8px;
+      font-size: 26px;
+      letter-spacing: 0;
+    }
+    #summary {
+      margin: 0 0 22px;
+      color: #45515e;
+    }
+    .actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      margin-bottom: 18px;
+    }
+    button {
+      min-height: 40px;
+      border: 1px solid #17633a;
+      border-radius: 5px;
+      padding: 0 16px;
+      background: #17633a;
+      color: #ffffff;
+      font: inherit;
+      font-weight: 600;
+      cursor: pointer;
+    }
+    button.secondary {
+      background: #ffffff;
+      color: #17633a;
+    }
+    button:disabled {
+      cursor: not-allowed;
+      opacity: 0.55;
+    }
+    #status {
+      min-height: 24px;
+      margin: 0 0 16px;
+      font-weight: 600;
+    }
+    #status.error {
+      color: #a12828;
+    }
+    ol {
+      margin: 0;
+      padding-left: 28px;
+    }
+    li {
+      margin: 9px 0;
+      overflow-wrap: anywhere;
+    }
+    a {
+      color: #075eab;
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Open new listings</h1>
+    <p id="summary">Loading listing links...</p>
+    <div class="actions">
+      <button id="open-all" type="button" disabled>Open all listings</button>
+      <button id="copy-all" class="secondary" type="button" disabled>Copy all URLs</button>
+    </div>
+    <p id="status" aria-live="polite"></p>
+    <ol id="links" aria-label="Fallback list of individual listing links"></ol>
+  </main>
+  <script>
+    const summary = document.getElementById("summary");
+    const status = document.getElementById("status");
+    const links = document.getElementById("links");
+    const openAllButton = document.getElementById("open-all");
+    const copyAllButton = document.getElementById("copy-all");
+    let urls = [];
+
+    function setError(message) {
+      status.textContent = message;
+      status.className = "error";
+    }
+
+    function decodeBase64Url(token) {
+      const normalized = token.replace(/-/g, "+").replace(/_/g, "/");
+      const padded = normalized.padEnd(Math.ceil(normalized.length / 4) * 4, "=");
+      const binary = atob(padded);
+      return Uint8Array.from(binary, (character) => character.charCodeAt(0));
+    }
+
+    async function decodePayload() {
+      const token = window.location.hash.slice(1);
+      if (!token) {
+        throw new Error("This launcher URL does not contain listing data.");
+      }
+      const compressed = decodeBase64Url(token);
+      const stream = new Blob([compressed])
+        .stream()
+        .pipeThrough(new DecompressionStream("deflate"));
+      const decoded = await new Response(stream).text();
+      return JSON.parse(decoded);
+    }
+
+    function validHttpUrl(value) {
+      try {
+        const parsed = new URL(value);
+        return parsed.protocol === "https:" || parsed.protocol === "http:";
+      } catch {
+        return false;
+      }
+    }
+
+    function render(payload) {
+      urls = [...new Set((payload.urls || []).filter(validHttpUrl))];
+      if (!urls.length) {
+        throw new Error("No valid listing URLs were found in this launcher.");
+      }
+      summary.textContent = `${payload.sheet || "Listing sheet"} | ${payload.date || "unknown date"} | ${urls.length} new listings`;
+      for (const url of urls) {
+        const item = document.createElement("li");
+        const anchor = document.createElement("a");
+        anchor.href = url;
+        anchor.target = "_blank";
+        anchor.rel = "noopener noreferrer";
+        anchor.textContent = url;
+        item.appendChild(anchor);
+        links.appendChild(item);
+      }
+      openAllButton.disabled = false;
+      copyAllButton.disabled = false;
+    }
+
+    openAllButton.addEventListener("click", () => {
+      let opened = 0;
+      for (const url of urls) {
+        if (window.open(url, "_blank", "noopener")) {
+          opened += 1;
+        }
+      }
+      if (opened === urls.length) {
+        status.textContent = `Opened ${opened} listings.`;
+        status.className = "";
+      } else {
+        setError(`Opened ${opened} of ${urls.length}. Allow pop-ups for this site and click Open all listings again, or use the individual links below.`);
+      }
+    });
+
+    copyAllButton.addEventListener("click", async () => {
+      try {
+        await navigator.clipboard.writeText(urls.join("\n"));
+        status.textContent = `Copied ${urls.length} URLs.`;
+        status.className = "";
+      } catch {
+        setError("The browser did not allow clipboard access. Use the individual links below.");
+      }
+    });
+
+    decodePayload().then(render).catch((error) => {
+      summary.textContent = "Launcher data could not be loaded.";
+      setError(error.message);
+    });
+  </script>
+</body>
+</html>
