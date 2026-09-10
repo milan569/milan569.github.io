@@ -84,6 +84,7 @@
     <p id="summary">Loading listing links...</p>
     <div class="actions">
       <button id="open-all" type="button" disabled>Open all listings</button>
+      <button id="open-next" class="secondary" type="button" disabled>Open next listing</button>
       <button id="copy-all" class="secondary" type="button" disabled>Copy all URLs</button>
     </div>
     <p id="status" aria-live="polite"></p>
@@ -95,7 +96,10 @@
     const links = document.getElementById("links");
     const openAllButton = document.getElementById("open-all");
     const copyAllButton = document.getElementById("copy-all");
+    const openNextButton = document.getElementById("open-next");
     let urls = [];
+    const opened = new Set();
+    const MAX_URLS = 500;
 
     function setError(message) {
       status.textContent = message;
@@ -114,25 +118,43 @@
       if (!token) {
         throw new Error("This launcher URL does not contain listing data.");
       }
+      if (token.length > 100000) throw new Error("Launcher data is too large.");
       const compressed = decodeBase64Url(token);
       const stream = new Blob([compressed])
         .stream()
         .pipeThrough(new DecompressionStream("deflate"));
-      const decoded = await new Response(stream).text();
+      const reader = stream.getReader();
+      const chunks = [];
+      let length = 0;
+      while (true) {
+        const {value, done} = await reader.read();
+        if (done) break;
+        length += value.byteLength;
+        if (length > 1000000) {
+          await reader.cancel();
+          throw new Error("Launcher data is too large.");
+        }
+        chunks.push(value);
+      }
+      const decoded = await new Blob(chunks).text();
       return JSON.parse(decoded);
     }
 
     function validHttpUrl(value) {
+      if (typeof value !== "string" || value.length > 4096) return false;
       try {
         const parsed = new URL(value);
-        return parsed.protocol === "https:" || parsed.protocol === "http:";
+        return (parsed.protocol === "https:" || parsed.protocol === "http:") && !parsed.username && !parsed.password;
       } catch {
         return false;
       }
     }
 
     function render(payload) {
-      urls = [...new Set((payload.urls || []).filter(validHttpUrl))];
+      if (!payload || !Array.isArray(payload.urls) || payload.urls.length > MAX_URLS || !payload.urls.every(validHttpUrl)) {
+        throw new Error("Invalid listing data. Open the individual links in Excel.");
+      }
+      urls = [...new Set(payload.urls)];
       if (!urls.length) {
         throw new Error("No valid listing URLs were found in this launcher.");
       }
@@ -144,26 +166,61 @@
         anchor.target = "_blank";
         anchor.rel = "noopener noreferrer";
         anchor.textContent = url;
+        anchor.addEventListener("click", (event) => {
+          if (!event.ctrlKey && !event.metaKey && !event.shiftKey && event.button === 0) {
+            event.preventDefault();
+            openListing(url);
+            updateStatus();
+          }
+        });
         item.appendChild(anchor);
         links.appendChild(item);
       }
       openAllButton.disabled = false;
+      openNextButton.disabled = false;
       copyAllButton.disabled = false;
+      updateStatus();
+    }
+
+    function openListing(url) {
+      if (opened.has(url)) return true;
+      // Obtain a measurable handle, sever its opener before any external navigation.
+      const tab = window.open("about:blank", "_blank");
+      if (!tab) return false;
+      try {
+        tab.opener = null;
+        tab.location.replace(url);
+        opened.add(url);
+        return true;
+      } catch {
+        tab.close();
+        return false;
+      }
+    }
+
+    function updateStatus(blocked = false) {
+      const remaining = urls.length - opened.size;
+      openAllButton.disabled = remaining === 0;
+      openNextButton.disabled = remaining === 0;
+      openAllButton.textContent = `Open remaining listings (${remaining})`;
+      status.textContent = `Opened ${opened.size} of ${urls.length}.` + (remaining ?
+        " If your browser allows only one tab, use Open next listing, or allow pop-ups for this site and open the remaining listings." : " All listings have been opened.");
+      status.className = blocked ? "error" : "";
+      for (const anchor of links.querySelectorAll("a")) {
+        anchor.textContent = (opened.has(anchor.href) ? "Opened — " : "") + anchor.href;
+      }
     }
 
     openAllButton.addEventListener("click", () => {
-      let opened = 0;
+      let blocked = false;
       for (const url of urls) {
-        if (window.open(url, "_blank", "noopener")) {
-          opened += 1;
-        }
+        if (!openListing(url)) { blocked = true; break; }
       }
-      if (opened === urls.length) {
-        status.textContent = `Opened ${opened} listings.`;
-        status.className = "";
-      } else {
-        setError(`Opened ${opened} of ${urls.length}. Allow pop-ups for this site and click Open all listings again, or use the individual links below.`);
-      }
+      updateStatus(blocked);
+    });
+    openNextButton.addEventListener("click", () => {
+      const next = urls.find(url => !opened.has(url));
+      updateStatus(next ? !openListing(next) : false);
     });
 
     copyAllButton.addEventListener("click", async () => {
